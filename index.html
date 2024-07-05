@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Particle Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            background-color: black;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="lissajousCanvas"></canvas>
+    <script>
+        // Your JavaScript code goes here
+        document.addEventListener("DOMContentLoaded", (event) => {
+            console.log("Landing page simulation initialized");
+
+            // Particle system with Barnes-Hut algorithm
+            const canvas = document.getElementById("lissajousCanvas");
+            const ctx = canvas.getContext("2d");
+            const particles = [];
+            let particleCount = 1000;
+            const maxParticles = 10000;
+            const minParticles = 100;
+            const softening = 0.2; // Gravitational softening factor
+            const maxDistance = 10000; // Maximum distance a particle can be from the canvas center before being culled
+            let mouseX = 0;
+            let mouseY = 0;
+            let lastTime = performance.now();
+            let fps = 60; // Initial assumption of 60 FPS
+
+            function resizeCanvas() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+                ctx.translate(canvas.width / 2, canvas.height / 2);
+            }
+
+            window.addEventListener("resize", resizeCanvas);
+            resizeCanvas();
+
+            // Function to get viridis-inspired color from velocity
+            function getColorFromVelocity(velocity) {
+                const maxSpeed = 5; // Adjust based on your simulation's expected max speed
+                const speed = Math.min(velocity / maxSpeed, 1);
+                const hue = (1 - speed) * 240;
+                const alpha = 0.3 + speed * 0.5; // Max transparency reduced for more subtle effect
+                return `hsla(${hue}, 100%, 50%, ${alpha})`;
+            }
+
+            class Quadtree {
+                constructor(boundary, capacity) {
+                    this.boundary = boundary;
+                    this.capacity = capacity;
+                    this.particles = [];
+                    this.divided = false;
+                    this.density = 0; // Initialize density
+                }
+
+                subdivide() {
+                    const { x, y, w, h } = this.boundary;
+                    const nw = { x: x - w / 2, y: y - h / 2, w: w / 2, h: h / 2 };
+                    const ne = { x: x + w / 2, y: y - h / 2, w: w / 2, h: h / 2 };
+                    const sw = { x: x - w / 2, y: y + h / 2, w: w / 2, h: h / 2 };
+                    const se = { x: x + w / 2, y: y + h / 2, w: w / 2, h: h / 2 };
+
+                    this.northwest = new Quadtree(nw, this.capacity);
+                    this.northeast = new Quadtree(ne, this.capacity);
+                    this.southwest = new Quadtree(sw, this.capacity);
+                    this.southeast = new Quadtree(se, this.capacity);
+
+                    this.divided = true;
+                }
+
+                insert(particle) {
+                    if (!this.contains(particle)) {
+                        return false;
+                    }
+
+                    if (this.particles.length < this.capacity) {
+                        this.particles.push(particle);
+                        return true;
+                    }
+
+                    if (!this.divided) {
+                        this.subdivide();
+                    }
+
+                    if (
+                        this.northwest.insert(particle) ||
+                        this.northeast.insert(particle) ||
+                        this.southwest.insert(particle) ||
+                        this.southeast.insert(particle)
+                    ) {
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                contains(particle) {
+                    const { x, y, w, h } = this.boundary;
+                    return (
+                        particle.x >= x - w &&
+                        particle.x < x + w &&
+                        particle.y >= y - h &&
+                        particle.y < y + h
+                    );
+                }
+
+                calculateMass() {
+                    if (this.divided) {
+                        this.northwest.calculateMass();
+                        this.northeast.calculateMass();
+                        this.southwest.calculateMass();
+                        this.southeast.calculateMass();
+
+                        this.mass =
+                            this.northwest.mass +
+                            this.northeast.mass +
+                            this.southwest.mass +
+                            this.southeast.mass;
+                        this.massX =
+                            (this.northwest.massX * this.northwest.mass +
+                                this.northeast.massX * this.northeast.mass +
+                                this.southwest.massX * this.southwest.mass +
+                                this.southeast.massX * this.southeast.mass) /
+                            this.mass;
+                        this.massY =
+                            (this.northwest.massY * this.northwest.mass +
+                                this.northeast.massY * this.northeast.mass +
+                                this.southwest.massY * this.southwest.mass +
+                                this.southeast.massY * this.southeast.mass) /
+                            this.mass;
+                    } else {
+                        this.mass = this.particles.reduce((sum, p) => sum + p.mass, 0);
+                        this.massX =
+                            this.particles.reduce((sum, p) => sum + p.x * p.mass, 0) / this.mass;
+                        this.massY =
+                            this.particles.reduce((sum, p) => sum + p.y * p.mass, 0) / this.mass;
+                    }
+                }
+
+                calculateDensity(maxDensity) {
+                    const area = this.boundary.w * this.boundary.h * 4;
+                    this.density = this.particles.length / area;
+                    maxDensity.value = Math.max(maxDensity.value, this.density);
+
+                    if (this.divided) {
+                        this.northwest.calculateDensity(maxDensity);
+                        this.northeast.calculateDensity(maxDensity);
+                        this.southwest.calculateDensity(maxDensity);
+                        this.southeast.calculateDensity(maxDensity);
+                    }
+                }
+
+                drawBackground(maxDensity) {
+                    const { x, y, w, h } = this.boundary;
+                    const normalizedDensity = this.density / maxDensity.value;
+                    ctx.fillStyle = `rgba(0, 0, 255, ${normalizedDensity * 0.3})`;
+                    ctx.fillRect(x - w, y - h, w * 2, h * 2);
+
+                    if (this.divided) {
+                        this.northwest.drawBackground(maxDensity);
+                        this.northeast.drawBackground(maxDensity);
+                        this.southwest.drawBackground(maxDensity);
+                        this.southeast.drawBackground(maxDensity);
+                    }
+                }
+
+                draw() {
+                    ctx.strokeStyle = "rgba(255, 255, 255, 0.05)"; // More transparent quadtree lines
+                    ctx.strokeRect(
+                        this.boundary.x - this.boundary.w,
+                        this.boundary.y - this.boundary.h,
+                        this.boundary.w * 2,
+                        this.boundary.h * 2
+                    );
+
+                    if (this.divided) {
+                        this.northwest.draw();
+                        this.northeast.draw();
+                        this.southwest.draw();
+                        this.southeast.draw();
+                    }
+                }
+            }
+
+            class Particle {
+                constructor(x, y, mass = 1, isText = false) {
+                    this.x = x;
+                    this.y = y;
+                    this.vx = Math.random() * 3 - 1;
+                    this.vy = Math.random() * 3 - 1;
+                    this.mass = mass;
+                    this.radius = Math.sqrt(mass) * 2; // Radius based on mass
+                    this.trail = [];
+                    this.maxTrailLength = 10;
+                    this.inBounds = true;
+                    this.isText = isText; // New flag to determine if this is a text particle
+                    this.text = "derby"; // Text for text particles
+                    this.growthRate = 0.05; // Growth rate for "derby" particles
+                    this.maxRadius = 20; // Maximum size for "derby" particles
+                    this.isDerby = isText; // Set true if it's a "derby" particle
+                }
+
+                update() {
+                    this.x += this.vx;
+                    this.y += this.vy;
+
+                    this.trail.push({ x: this.x, y: this.y });
+                    if (this.trail.length > this.maxTrailLength) {
+                        this.trail.shift();
+                    }
+
+                    // Grow "derby" particles
+                    if (this.isDerby && this.radius < this.maxRadius) {
+                        this.radius += this.growthRate;
+                    }
+
+                    // Cull particles that move too far from the canvas center
+                    if (Math.abs(this.x) > maxDistance || Math.abs(this.y) > maxDistance) {
+                        this.inBounds = false;
+                    }
+                }
+
+                applyForce(fx, fy) {
+                    this.vx += fx / this.mass; // Adjust force by mass
+                    this.vy += fy / this.mass; // Adjust force by mass
+                }
+
+                draw() {
+                    if (this.isText) {
+                        // Save the current context state
+                        ctx.save();
+
+                        // Translate to the particle's position
+                        ctx.translate(this.x, this.y);
+
+                        // Rotate according to the direction of velocity
+                        const angle = Math.atan2(this.vy, this.vx);
+                        ctx.rotate(angle);
+
+                        // Draw the text
+                        ctx.font = `${this.radius * 2}px Arial`; // Adjust font size based on mass
+                        ctx.fillStyle = "white";
+                        ctx.fillText(this.text, -ctx.measureText(this.text).width / 2, 0);
+
+                        // Restore the context to its original state
+                        ctx.restore();
+                    } else {
+                        const velocity = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+                        ctx.strokeStyle = getColorFromVelocity(velocity);
+                        ctx.lineWidth = 1;
+
+                        ctx.beginPath();
+                        ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                        for (let i = 1; i < this.trail.length; i++) {
+                            ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                        }
+                        ctx.stroke();
+
+                        ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.radius, 0, 2 * Math.PI);
+                        ctx.fillStyle = "white";
+                        ctx.fill();
+                    }
+                }
+            }
+
+            function createParticles() {
+                for (let i = 0; i < particleCount; i++) {
+                    const angle = Math.random() * 2 * Math.PI;
+                    const radius =
+                        Math.random() * (Math.min(canvas.width, canvas.height) / 2);
+                    const x = Math.cos(angle) * radius;
+                    const y = Math.sin(angle) * radius;
+                    particles.push(new Particle(x, y));
+                }
+            }
+
+            function updateParticles() {
+                particles.forEach((p) => p.update());
+                // Remove particles that are out of bounds
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    if (!particles[i].inBounds) {
+                        particles.splice(i, 1);
+                    }
+                }
+            }
+
+            function drawParticles() {
+                particles.forEach((p) => p.draw());
+            }
+
+            function calculateForces(quadtree, particle) {
+                if (!quadtree.contains(particle)) {
+                    return;
+                }
+
+                if (quadtree.particles.length === 1 && quadtree.particles[0] === particle) {
+                    return;
+                }
+
+                const dx = quadtree.massX - particle.x;
+                const dy = quadtree.massY - particle.y;
+                const distance = Math.sqrt(dx * dx + dy * dy) + softening;
+                const force = distance > 0 ? quadtree.mass / (distance * distance) : 0;
+
+                if (
+                    quadtree.particles.length === 1 ||
+                    quadtree.boundary.w / distance < 0.5
+                ) {
+                    particle.applyForce(dx * force, dy * force);
+                } else {
+                    if (quadtree.northwest) calculateForces(quadtree.northwest, particle);
+                    if (quadtree.northeast) calculateForces(quadtree.northeast, particle);
+                    if (quadtree.southwest) calculateForces(quadtree.southwest, particle);
+                    if (quadtree.southeast) calculateForces(quadtree.southeast, particle);
+                }
+            }
+
+            function handleCollisions() {
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const p1 = particles[i];
+                        const p2 = particles[j];
+                        const dx = p1.x - p2.x;
+                        const dy = p1.y - p2.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        if (distance < p1.radius + p2.radius) {
+                            const angle = Math.atan2(dy, dx);
+                            const sin = Math.sin(angle);
+                            const cos = Math.cos(angle);
+
+                            // Rotate particle positions
+                            const p1x = 0;
+                            const p1y = 0;
+                            const p2x = dx * cos + dy * sin;
+                            const p2y = dy * cos - dx * sin;
+
+                            // Rotate particle velocities
+                            const v1x = p1.vx * cos + p1.vy * sin;
+                            const v1y = p1.vy * cos - p1.vx * sin;
+                            const v2x = p2.vx * cos + p2.vy * sin;
+                            const v2y = p2.vy * cos - p2.vx * sin;
+
+                            // Collision reaction
+                            const v1xFinal =
+                                ((p1.mass - p2.mass) * v1x + 2 * p2.mass * v2x) /
+                                (p1.mass + p2.mass);
+                            const v2xFinal =
+                                ((p2.mass - p1.mass) * v2x + 2 * p1.mass * v1x) /
+                                (p1.mass + p2.mass);
+
+                            // Update velocities
+                            p1.vx = v1xFinal * cos - v1y * sin;
+                            p1.vy = v1y * cos + v1xFinal * sin;
+                            p2.vx = v2xFinal * cos - v2y * sin;
+                            p2.vy = v2y * cos + v2xFinal * sin;
+
+                            // Update positions to avoid overlap
+                            const absV = Math.abs(v1xFinal) + Math.abs(v2xFinal);
+                            const overlap = p1.radius + p2.radius - Math.abs(p1x - p2x);
+                            p1.x += (v1xFinal / absV) * overlap;
+                            p2.x -= (v2xFinal / absV) * overlap;
+                        }
+                    }
+                }
+            }
+
+            // Call handleCollisions in animateParticles function
+            function animateParticles(timestamp) {
+                const elapsed = timestamp - lastTime;
+                lastTime = timestamp;
+
+                // Clear the canvas
+                ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+                ctx.fillRect(-canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+
+                const boundary = { x: 0, y: 0, w: canvas.width / 2, h: canvas.height / 2 };
+                const quadtree = new Quadtree(boundary, 4);
+
+                particles.forEach((p) => quadtree.insert(p));
+                quadtree.calculateMass();
+
+                // Calculate density and find maximum density
+                const maxDensity = { value: 0 };
+                quadtree.calculateDensity(maxDensity);
+
+                // Draw the background based on density
+                quadtree.drawBackground(maxDensity);
+
+                particles.forEach((p) => calculateForces(quadtree, p));
+
+                // Apply attraction to the mouse
+                particles.forEach((p) => {
+                    const dx = mouseX - p.x;
+                    const dy = mouseY - p.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy) + softening;
+                    const force = distance > 0 ? 5 / (distance * distance) : 0; // Increased force
+                    p.applyForce(dx * force, dy * force);
+                });
+
+                updateParticles();
+                handleCollisions(); // Handle collisions
+                drawParticles();
+
+                // Adjust particle count based on frame rate
+                adjustParticleCount(elapsed);
+
+                // Randomly spawn a "derby" particle
+                if (Math.random() < 0.1) { // Adjust probability as needed
+                    const x = Math.random() * canvas.width - canvas.width / 2;
+                    const y = Math.random() * canvas.height - canvas.height / 2;
+                    particles.push(new Particle(x, y, 1, true)); // Start with small mass
+                }
+
+                window.animationFrameId = requestAnimationFrame(animateParticles);
+            }
+
+            function adjustParticleCount(elapsed) {
+                fps = 1000 / elapsed;
+
+                if (fps < 50 && particleCount > minParticles) {
+                    particleCount -= 10;
+                    particles.splice(0, 10);
+                } else if (fps > 55 && particleCount < maxParticles) {
+                    particleCount += 10;
+                    for (let i = 0; i < 10; i++) {
+                        const angle = Math.random() * 2 * Math.PI;
+                        const radius =
+                            Math.random() * (Math.min(canvas.width, canvas.height) / 2);
+                        const x = Math.cos(angle) * radius;
+                        const y = Math.sin(angle) * radius;
+                        particles.push(new Particle(x, y));
+                    }
+                }
+            }
+
+            window.addEventListener("mousemove", (event) => {
+                mouseX = event.clientX - canvas.width / 2;
+                mouseY = event.clientY - canvas.width / 2;
+            });
+
+            canvas.addEventListener("click", (event) => {
+                const x = event.clientX - canvas.width / 2;
+                const y = event.clientY - canvas.height / 2;
+                const mass = Math.random() * 100 + 10; // Random mass for the new particle
+                particles.push(new Particle(x, y, mass, true)); // Pass true to mark this as a text particle
+            });
+
+            createParticles();
+            window.animationFrameId = requestAnimationFrame(animateParticles);
+        });
+    </script>
+</body>
+</html>
